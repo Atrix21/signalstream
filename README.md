@@ -1,195 +1,200 @@
-# SignalStream: AI-Powered Financial Event Analysis Platform
+# SignalStream
 
-SignalStream is a real-time, end-to-end data engineering project that demonstrates a sophisticated pipeline for ingesting, enriching, and alerting on financial events. The platform connects to live financial news APIs and SEC filing feeds, uses AI to understand the semantic content of each event, and leverages a vector database to find and alert on events that match user-defined investment strategies.
+A real-time financial event pipeline that ingests market news and SEC filings, enriches them with semantic embeddings, and triggers alerts when incoming events match user-defined investment strategies via vector similarity search.
 
-This project showcases a high level of proficiency in Go, concurrent system design, practical AI integration, and modern data engineering principles within the finance domain.
+Users define strategies using natural language queries like "merger and acquisition activity in the technology sector" with optional source and ticker filters. The system continuously processes incoming events and alerts users when content semantically matches their strategies above a configurable similarity threshold — not keyword matching, but meaning-based matching using cosine similarity over OpenAI embeddings.
 
- 
-## Architecture Diagram
+## Architecture
 
-```mermaid
-graph TD
-    subgraph "External Data Sources"
-        direction LR
-        polygon["Polygon.io News API"]
-        sec["SEC EDGAR RSS Feeds"]
-    end
-
-    subgraph "External Services"
-        direction LR
-        openai["OpenAI API<br>(text-embedding-3-small)"]
-        qdrant["Qdrant Vector DB<br>(via Docker)"]
-    end
-
-    subgraph "SignalStream Application (Go)"
-        direction TB
-        ingestion["Multi-Source Ingestion Service"]
-        enrichment["AI Enrichment Service"]
-        storage["Vector Storage Service"]
-        alerter["Real-Time Alerting Engine"]
-        notifier["Notification Service"]
-
-        ingestion --> enrichment
-        enrichment --> storage
-        storage --> alerter
-        alerter --> notifier
-    end
-
-    subgraph "User Interaction"
-        strategies["User-Defined Strategies<br>(e.g., 'M&A Activity')"]
-    end
-    
-    subgraph "Output"
-        console["Console Alerts"]
-    end
-
-    %% Data Flow & Interactions
-    polygon --> ingestion
-    sec --> ingestion
-    
-    enrichment -- "Sends text for embedding" --> openai
-    openai -- "Returns semantic vector" --> enrichment
-
-    storage -- "Stores enriched event & vector" --> qdrant
-    alerter -- "Performs semantic search" --> qdrant
-
-    strategies -- "Defines search criteria" --> alerter
-    notifier --> console
-
-
-    %% Styling
-    classDef app fill:#D2E0FB,stroke:#333,stroke-width:2px;
-    classDef external fill:#F9F3CC,stroke:#333,stroke-width:2px;
-    classDef data fill:#D4EDDA,stroke:#333,stroke-width:2px;
-    
-    class ingestion,enrichment,storage,alerter,notifier app
-    class qdrant,openai external
-    class polygon,sec,strategies,console data
+```
+┌──────────────┐   ┌──────────────┐
+│ Polygon.io   │   │ SEC EDGAR    │
+│ News API     │   │ 8-K Filings  │
+└──────┬───────┘   └──────┬───────┘
+       │ rate-limited      │ 90s poll
+       │ (1 req/12s)       │
+       ▼                   ▼
+   ┌──────────────────────────┐
+   │   NormalizedEvent chan   │  buffered channel (cap 100)
+   │       (fan-in)          │
+   └────────────┬────────────┘
+                │
+        ┌───────┼───────┐
+        ▼       ▼       ▼        4 worker goroutines (fan-out)
+   ┌─────────────────────────┐
+   │    Enrichment Service   │
+   │  fetch article text     │
+   │  → OpenAI embedding     │
+   │  → Qdrant upsert        │
+   └────────────┬────────────┘
+                │
+   ┌────────────▼────────────┐
+   │     Alerter Service     │
+   │  load active strategies │
+   │  → pre-filter (source/  │
+   │    ticker)              │
+   │  → embed strategy query │
+   │  → Qdrant cosine search │
+   │  → threshold check      │
+   └────────────┬────────────┘
+                │
+   ┌────────────▼────────────┐
+   │    MultiNotifier        │
+   │  → structured log       │
+   │  → PostgreSQL persist   │
+   │  → SSE broadcast        │
+   └─────────────────────────┘
+                │
+        ┌───────┼───────┐
+        ▼       ▼       ▼
+   [Log]    [Database]  [Browser via SSE]
 ```
 
----
+### Components
 
-## Features
+- **Ingestion** — Two producer goroutines poll Polygon.io (rate-limited via `x/time/rate`) and SEC EDGAR (Atom feed via `gofeed`). Both normalize events into a shared `NormalizedEvent` struct and push to a buffered channel.
 
-*   **Multi-Source Ingestion:** Concurrently ingests data from real-time news APIs (Polygon.io) and government sources (SEC EDGAR filings).
-*   **AI-Powered Enrichment:** Utilizes OpenAI's embedding models to analyze the content of each news article and filing, creating a semantic vector representation.
-*   **Vector Storage & Search:** Stores enriched data in a Qdrant vector database, enabling high-speed, filtered semantic search.
-*   **Real-Time Alerting Engine:** Allows users to define nuanced investment strategies (e.g., "M&A activity for portfolio companies"). It compares incoming events against these strategies and triggers alerts for relevant matches.
-*   **Robust & Resilient:** Built with Go's powerful concurrency primitives, featuring graceful shutdown, rate limiting for external APIs, and a scalable worker pool architecture.
+- **Enrichment** — Workers fetch full article text using `go-readability`, generate 1536-dimensional embeddings via OpenAI `text-embedding-3-small`, and upsert into Qdrant with deterministic UUID v5 point IDs for idempotency.
 
-## Tech Stack & Architecture
+- **Alerter** — For each enriched event, the alerter loads all active strategies from PostgreSQL, pre-filters by source/ticker overlap (avoiding unnecessary API calls), embeds the strategy query, performs a filtered cosine similarity search in Qdrant, and checks if the event appears in results above the user's threshold.
 
-SignalStream is built as a multi-service Go application designed for scalability and maintainability.
+- **Notification** — A `MultiNotifier` fans out alert delivery: structured log output, PostgreSQL persistence, and SSE broadcast to connected browser clients.
 
-*   **Language:** Go
-*   **Primary Libraries:**
-    *   **Concurrency:** Go Routines, Channels
-    *   **API Clients:** `polygon-io/client-go`, `go-openai`
-    *   **Data Parsing:** `go-readability`, `gofeed`
-    *   **Vector DB Client:** `qdrant/go-client`
-*   **Infrastructure:**
-    *   **Vector Database:** Qdrant (running via Docker)
-    *   **AI Service:** OpenAI API (for `text-embedding-3-small` model)
-    *   **Data Sources:** Polygon.io News API, SEC EDGAR RSS Feeds
+- **API Server** — REST API with JWT authentication, AES-256-GCM encrypted API key storage, strategy CRUD, paginated alerts, and SSE streaming.
 
----
+- **Frontend** — React + TypeScript dashboard with Zustand state management, TanStack Query for data fetching, and Tremor UI components.
 
-## Getting Started
+## Data Flow
 
-Follow these instructions to get a local copy up and running for development and testing purposes.
+```
+1. Polygon/SEC → poll → NormalizedEvent
+2. NormalizedEvent → buffered channel (100)
+3. Worker pool (4) → fetch article text (go-readability, 30s timeout)
+4. Article text → OpenAI text-embedding-3-small → 1536-dim vector
+5. Vector + metadata → Qdrant upsert (deterministic UUID v5)
+6. Load active strategies (PostgreSQL JOIN users)
+7. Pre-filter: source/ticker match check
+8. Strategy query → OpenAI embedding
+9. Qdrant cosine similarity search (filtered, top 10)
+10. If event in results AND score ≥ threshold → trigger alert
+11. Alert → log + PostgreSQL + SSE broadcast
+```
+
+## Key Features
+
+- **Fan-in/fan-out pipeline** — 2 producers, buffered channel, 4 consumer workers with per-event context timeouts (2min) and graceful shutdown via OS signals
+- **Semantic alerting** — Vector similarity search instead of keyword matching. Users define strategies in natural language
+- **Retry with exponential backoff** — All OpenAI and Qdrant calls wrapped with configurable retry (3 attempts, jitter, context-aware)
+- **Structured logging** — JSON-formatted `slog` output with event_id, strategy_id, latency_ms, and contextual fields throughout
+- **Metrics** — Atomic counters for events_ingested, events_processed, events_enriched, alerts_triggered, errors_total, retry_attempts. Exposed via `/api/v1/metrics`
+- **SSE real-time alerts** — Server-Sent Events endpoint streams alerts to connected clients, supporting multiple tabs per user
+- **Security** — JWT (HS256, 24h expiry), bcrypt password hashing, AES-256-GCM encryption for stored API keys
+- **Interface-driven design** — `Embedder`, `VectorSearcher`, `StrategyStore`, `Notifier`, `ContentFetcher` interfaces enable testing with mocks
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Language | Go 1.24 |
+| Database | PostgreSQL 16 (pgx/v5 driver, connection pool) |
+| Vector DB | Qdrant (gRPC client, cosine similarity, 1536-dim) |
+| Embeddings | OpenAI text-embedding-3-small |
+| News Data | Polygon.io client-go |
+| SEC Data | gofeed (Atom parser) + SEC EDGAR RSS |
+| Auth | golang-jwt/v5 (HS256), bcrypt, AES-256-GCM |
+| Frontend | React 18, TypeScript, Vite, TailwindCSS, Tremor, Zustand, TanStack Query |
+| Infra | Docker Compose, GitHub Actions CI |
+
+## Running the Project
 
 ### Prerequisites
 
-*   Go (version 1.21 or later)
-*   Docker and Docker Compose
-*   An active API key from [Polygon.io](https://polygon.io/) (the free plan is sufficient).
-*   An active API key from [OpenAI](https://platform.openai.com/).
+- Go 1.24+
+- Docker and Docker Compose
+- [Polygon.io](https://polygon.io/) API key (free tier works)
+- [OpenAI](https://platform.openai.com/) API key
 
-### Installation & Setup
+### Setup
 
-1.  **Clone the repository:**
-    ```sh
-    git clone https://github.com/Atrix21/signalstream.git
-    cd signalstream
-    ```
+```sh
+git clone https://github.com/Atrix21/signalstream.git
+cd signalstream
 
-2.  **Set up environment variables:**
-    *   Copy the example environment file:
-        ```sh
-        cp .env.example .env
-        ```
-    *   Edit the `.env` file and add your secret API keys:
-        ```ini
-        # .env
-        POLYGON_API_KEY="your_polygon_key_here"
-        OPENAI_API_KEY="sk-your_openai_key_here"
+# Configure environment
+cp .env.example .env
+# Edit .env with your API keys, JWT secret (≥16 chars), and encryption key (exactly 32 bytes)
 
-        # These can usually be left as default for local setup
-        LOG_LEVEL="info"
-        QDRANT_ADDR="localhost:6334"
-        ```
+# Start infrastructure (PostgreSQL + Qdrant)
+docker-compose up -d
 
-3.  **Start the Qdrant Database:**
-    *   Ensure Docker Desktop is running.
-    *   In the project root, run:
-        ```sh
-        docker-compose up -d
-        ```
-    *   You can verify that Qdrant is running by visiting its dashboard at [http://localhost:6333/dashboard](http://localhost:6333/dashboard).
+# Install dependencies
+go mod tidy
 
-4.  **Install Go dependencies:**
-    ```sh
-    go mod tidy
-    ```
+# Run the backend
+go run ./cmd/signalstream/
 
-5.  **Run the application:**
-    ```sh
-    go run ./cmd/signalstream/
-    ```
+# Run the frontend (separate terminal)
+cd frontend && npm install && npm run dev
+```
 
-The application will now be running. It will create the necessary Qdrant collection on its first startup and begin ingesting and enriching data. Alerts will be printed to the console as they are triggered.
+### Running Tests
 
----
+```sh
+go test ./internal/... -race -count=1
+```
+
+## API Overview
+
+All routes under `/api/v1/`. Authenticated routes require `Authorization: Bearer <jwt>`.
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/auth/register` | No | Create account, returns JWT |
+| POST | `/auth/login` | No | Authenticate, returns JWT |
+| GET | `/auth/me` | Yes | Current user profile |
+| GET | `/strategies` | Yes | List user strategies |
+| POST | `/strategies` | Yes | Create strategy |
+| DELETE | `/strategies?id=` | Yes | Delete strategy |
+| PATCH | `/strategies/toggle?id=` | Yes | Toggle strategy active/paused |
+| GET | `/alerts?limit=&offset=` | Yes | Paginated alert list |
+| PATCH | `/alerts/read?id=` | Yes | Mark alert as read |
+| GET | `/alerts/stream` | Yes | SSE — real-time alert stream |
+| GET | `/keys` | Yes | List API key status (has_key booleans) |
+| POST | `/keys` | Yes | Store encrypted API key |
+| DELETE | `/keys?provider=` | Yes | Remove API key |
+| GET | `/metrics` | No | JSON metrics counters |
+
+## Design Decisions
+
+**Go channels instead of Kafka/Redis** — The event throughput (2 sources, ~5 events/minute) doesn't justify external messaging infrastructure. A buffered Go channel provides the same fan-in/fan-out pattern with zero operational overhead. The `NormalizedEvent` struct acts as the contract between producers and consumers.
+
+**Qdrant for vector storage** — Purpose-built for filtered vector search. Supports combining cosine similarity with metadata filters (source, tickers) in a single query. The gRPC client provides efficient communication compared to REST-based alternatives.
+
+**OpenAI embeddings for semantic matching** — `text-embedding-3-small` provides 1536-dimensional vectors that capture semantic meaning. This enables matching events to strategies based on conceptual similarity rather than keyword overlap. A user strategy like "earnings surprises in semiconductor companies" will match articles about unexpected chip revenue without requiring those exact words.
+
+**Deterministic UUID v5 for point IDs** — `uuid.NewSHA1(uuid.Nil, []byte(event.ID))` ensures the same event always maps to the same Qdrant point ID, making upserts idempotent across restarts.
+
+**MultiNotifier pattern** — Fan-out notifications to multiple backends (log, database, SSE) through a single `Notifier` interface. Adding a new delivery channel (email, Slack) requires implementing one method.
 
 ## Project Structure
 
-The project follows the standard Go project layout for clarity and scalability.
-
 ```
-signalstream/
-├── cmd/signalstream/     # Main application entry point
-├── internal/
-│   ├── alerter/          # Core alerting logic and strategy definition
-│   ├── config/           # Environment variable loading
-│   ├── enrichment/       # AI embedding and Qdrant storage service
-│   ├── ingestion/        # Data polling services (Polygon, SEC)
-│   ├── notification/     # Notifier interface and implementations
-│   ├── platform/         # Core data structures (NormalizedEvent)
-│   └── sec/              # Utilities for SEC data (CIK mapping)
-├── tools/
-│   └── qdrant-inspector/ # A separate tool to inspect the Qdrant DB
-├── .env.example          # Environment variable template
-├── .gitignore
-├── docker-compose.yml    # Docker configuration for Qdrant
-├── go.mod
-└── README.md
+cmd/signalstream/        # Application entry point and worker orchestration
+internal/
+  alerter/               # Strategy evaluation engine with vector search
+  api/                   # HTTP server, routes, JWT middleware, SSE handler
+  auth/                  # JWT tokens, bcrypt passwords, AES-GCM encryption
+  config/                # Environment-based configuration with validation
+  database/              # PostgreSQL repository layer, embedded migrations
+  embedding/             # Shared Embedder interface + OpenAI implementation
+  enrichment/            # Article fetching, embedding, Qdrant upsert pipeline
+  ingestion/             # Polygon.io and SEC EDGAR polling producers
+  metrics/               # Atomic counters and /metrics HTTP handler
+  notification/          # Notifier interface, log/database/multi implementations
+  platform/              # NormalizedEvent — canonical event struct
+  retry/                 # Exponential backoff with jitter, context-aware
+  sec/                   # SEC CIK-to-ticker mapping (singleton, thread-safe)
+  sse/                   # Server-Sent Events broker (pub/sub, per-user channels)
+frontend/                # React + TypeScript dashboard
+tools/qdrant-inspector/  # Standalone Qdrant collection diagnostic CLI
 ```
-
-## Future Work
-
-This project provides a strong foundation that can be extended in many ways:
-
-*   **Web Interface:** Build a web UI (using Go's `net/http` or a framework like Gin) for users to create, manage, and view their strategies and alerts.
-*   **Database for Strategies:** Store user strategies in a persistent database like PostgreSQL instead of hardcoding them.
-*   **More Notifiers:** Implement additional `Notifier` types for services like Slack, Discord, or email (SMTP).
-*   **More Data Sources:** Add more ingestion producers for sources like Twitter/X, Reddit, or alternative financial news APIs.
-
----
-
-## Contact
-
-Singireddy Aditya Reddy - aditya.singireddy.21@gmail.com
-
-Project Link: [https://github.com/Atrix21/signalstream](https://github.com/Atrix21/signalstream)
-
----

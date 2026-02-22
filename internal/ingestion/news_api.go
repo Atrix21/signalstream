@@ -2,7 +2,7 @@ package ingestion
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -11,6 +11,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/Atrix21/signalstream/internal/config"
+	"github.com/Atrix21/signalstream/internal/metrics"
 	"github.com/Atrix21/signalstream/internal/platform"
 )
 
@@ -18,19 +19,15 @@ import (
 // and sends normalized events into the events channel.
 func RunNewsAPIPoller(ctx context.Context, wg *sync.WaitGroup, events chan<- platform.NormalizedEvent, cfg config.AppConfig) {
 	defer wg.Done()
-	log.Println("News API poller started.")
+	slog.Info("news API poller started")
 
 	c := polygon.New(cfg.PolygonAPIKey)
-
 	limiter := rate.NewLimiter(rate.Every(12*time.Second), 1)
-
 	lastSeenID := ""
 
 	for {
-		err := limiter.Wait(ctx)
-		if err != nil {
-
-			log.Println("News API poller shutting down.")
+		if err := limiter.Wait(ctx); err != nil {
+			slog.Info("news API poller shutting down")
 			return
 		}
 
@@ -38,9 +35,8 @@ func RunNewsAPIPoller(ctx context.Context, wg *sync.WaitGroup, events chan<- pla
 	}
 }
 
-// pollNews contains the logic for a single polling action.
 func pollNews(ctx context.Context, c *polygon.Client, lastSeenID *string, events chan<- platform.NormalizedEvent) {
-	log.Println("Polling news API...")
+	slog.Debug("polling news API")
 
 	params := models.ListTickerNewsParams{}.WithLimit(50)
 	iter := c.ListTickerNews(ctx, params)
@@ -53,8 +49,6 @@ func pollNews(ctx context.Context, c *polygon.Client, lastSeenID *string, events
 		if newsItem.ID == *lastSeenID {
 			break
 		}
-
-		log.Printf("Found new article: %s", newsItem.Title)
 
 		var tickers []string
 		tickers = append(tickers, newsItem.Tickers...)
@@ -72,7 +66,8 @@ func pollNews(ctx context.Context, c *polygon.Client, lastSeenID *string, events
 	}
 
 	if iter.Err() != nil {
-		log.Printf("Error iterating news: %v", iter.Err())
+		slog.Error("error iterating news", "error", iter.Err())
+		metrics.Global.ErrorsTotal.Add(1)
 		return
 	}
 
@@ -80,6 +75,8 @@ func pollNews(ctx context.Context, c *polygon.Client, lastSeenID *string, events
 		*lastSeenID = newArticles[0].ID
 		for i := len(newArticles) - 1; i >= 0; i-- {
 			events <- newArticles[i]
+			metrics.Global.EventsIngested.Add(1)
 		}
+		slog.Info("ingested news articles", "count", len(newArticles))
 	}
 }

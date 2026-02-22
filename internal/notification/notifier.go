@@ -2,40 +2,48 @@ package notification
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 )
 
-// Notifier now uses the decoupled AlertData struct.
+// Notifier sends alert notifications through a delivery channel.
 type Notifier interface {
 	Send(data AlertData) error
 }
 
+// LogNotifier logs alerts to structured output.
 type LogNotifier struct{}
 
 func NewLogNotifier() *LogNotifier {
 	return &LogNotifier{}
 }
 
-// Send now takes the AlertData struct.
 func (n *LogNotifier) Send(data AlertData) error {
-	alertMsg := fmt.Sprintf(
-		"\n"+
-			"========================= 🚨 ALERT TRIGGERED 🚨 ========================\n"+
-			"Strategy: %s\n"+
-			"Recipient: %s\n"+
-			"Event: %s\n"+
-			"Source: %s\n"+
-			"URL: %s\n"+
-			"Similarity Score: %.4f (Threshold: %.2f)\n"+
-			"========================================================================\n",
-		data.StrategyDescription,
-		data.Recipient,
-		data.EventTitle,
-		data.EventSource,
-		data.EventURL,
-		data.SimilarityScore,
-		data.SimilarityThreshold,
+	slog.Info("alert triggered",
+		"strategy_id", data.StrategyID,
+		"recipient", data.Recipient,
+		"event_title", data.EventTitle,
+		"event_source", data.EventSource,
+		"similarity_score", fmt.Sprintf("%.4f", data.SimilarityScore),
+		"threshold", fmt.Sprintf("%.2f", data.SimilarityThreshold),
 	)
-	log.Println(alertMsg)
 	return nil
+}
+
+// MultiNotifier fans out alert delivery to multiple notifiers.
+type MultiNotifier struct {
+	notifiers []Notifier
+}
+
+func NewMultiNotifier(notifiers ...Notifier) *MultiNotifier {
+	return &MultiNotifier{notifiers: notifiers}
+}
+
+func (m *MultiNotifier) Send(data AlertData) error {
+	var firstErr error
+	for _, n := range m.notifiers {
+		if err := n.Send(data); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

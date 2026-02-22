@@ -2,7 +2,7 @@ package sec
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
@@ -10,17 +10,17 @@ import (
 
 const cikMapURL = "https://www.sec.gov/files/company_tickers.json"
 
-// CIKEntry represents the structure of each entry in the SEC's JSON data.
+// CIKEntry represents a single entry in the SEC's company_tickers.json.
 type CIKEntry struct {
 	CIK    int    `json:"cik_str"`
 	Ticker string `json:"ticker"`
 	Title  string `json:"title"`
 }
 
-// CIKMap holds the mapping from CIK numbers to Ticker symbols.
+// CIKMap holds the mapping from CIK numbers to ticker symbols.
 type CIKMap struct {
 	mu   sync.RWMutex
-	Data map[string]string
+	data map[string]string
 }
 
 var (
@@ -31,24 +31,21 @@ var (
 // GetCIKMap returns a singleton instance of the CIKMap, initializing it on first use.
 func GetCIKMap() *CIKMap {
 	once.Do(func() {
-		log.Println("Initializing CIK to Ticker mapping...")
-		m := &CIKMap{
-			Data: make(map[string]string),
-		}
+		slog.Info("initializing CIK-to-ticker mapping")
+		m := &CIKMap{data: make(map[string]string)}
 
-		// We use a custom client with a User-Agent, just like in the poller.
 		client := &http.Client{}
 		req, err := http.NewRequest("GET", cikMapURL, nil)
 		if err != nil {
-			log.Printf("Failed to create request for CIK map: %v", err)
-			cikMap = m // return empty map
+			slog.Error("failed to create CIK map request", "error", err)
+			cikMap = m
 			return
 		}
 		req.Header.Set("User-Agent", "SignalStream App v0.1 user@example.com")
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("Failed to download CIK map: %v", err)
+			slog.Error("failed to download CIK map", "error", err)
 			cikMap = m
 			return
 		}
@@ -56,19 +53,17 @@ func GetCIKMap() *CIKMap {
 
 		var allEntries map[string]CIKEntry
 		if err := json.NewDecoder(resp.Body).Decode(&allEntries); err != nil {
-			log.Printf("Failed to decode CIK map JSON: %v", err)
+			slog.Error("failed to decode CIK map JSON", "error", err)
 			cikMap = m
 			return
 		}
 
-		// The JSON is structured as {"0": entry, "1": entry}. We need to transform it.
 		for _, entry := range allEntries {
-			// Convert the integer CIK to a string for mapping.
-			m.Data[strconv.Itoa(entry.CIK)] = entry.Ticker
+			m.data[strconv.Itoa(entry.CIK)] = entry.Ticker
 		}
 
 		cikMap = m
-		log.Printf("CIK to Ticker mapping initialized with %d entries.", len(m.Data))
+		slog.Info("CIK-to-ticker mapping initialized", "entries", len(m.data))
 	})
 	return cikMap
 }
@@ -77,6 +72,6 @@ func GetCIKMap() *CIKMap {
 func (m *CIKMap) Ticker(cik string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	ticker, found := m.Data[cik]
+	ticker, found := m.data[cik]
 	return ticker, found
 }

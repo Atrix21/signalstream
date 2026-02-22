@@ -9,6 +9,7 @@
 *.dll
 *.so
 *.dylib
+/signalstream
 
 # Test binary, built with `go test -c`
 *.test
@@ -23,5 +24,12 @@ go.work
 /vendor/
 /build/
 
-# log files
+# Log files
 *.log
+
+# Qdrant local data
+qdrant_storage/
+
+# IDE
+.idea/
+.vscode/
